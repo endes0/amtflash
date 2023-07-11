@@ -1,0 +1,31 @@
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "amtflash"
+version = "0.0.1"
+authors = [
+  { name="Endes", email="endes@disroot.org" },
+]
+description = "Device driver for the AMT Flash (MPPS) v13 OBD Cable"
+license = { text="Apache-2.0" }
+readme = "README.md"
+requires-python = ">=3.7"
+keywords = ["obd", "obdii", "obd-ii", "obd2", "car", "vehicle", "MPPS", "AMT", "driver"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Topic :: System :: Hardware :: Hardware Drivers"
+]
+dependencies = [
+    "pyusb>=1.2.1"
+]
+
+[project.urls]
+Homepage = "https://github.com/endes0/amtflash"
+Repository = "https://github.com/endes0/amtflash.git"
+Source        = 'https://github.com/endes0/amtflash'
+Issues        = 'https://github.com/endes0/amtflash/issues'
