@@ -207,9 +207,38 @@ class KWPInterface:
     
 
 class CANInterface:
+
+    class BusTimming(int):
+        Custom = 0
+        Mode1 = 1
+        Mode2 = 2
+        Mode3 = 3
+        Mode4 = 4
+        Mode5 = 5
+        Mode6 = 6
+        Mode7 = 7 #50000 bauds
+        Mode8 = 8
+        Mode9 = 9
+    
+    class Encapsulation(int):
+        #Maybe related to ISO 15765?
+        Mode0 = 0
+        Mode1 = 1
+        Mode2 = 2
+        Raw0 = 3
+        Mode4 = 4
+        Raw1 = 5
+        Mode6 = 6
+        Mode7 = 7
+        Mode8 = 8
+
+
     def __init__(self, parent: AMTFlasher) -> None:
         self._parent = parent
     
+    def close(self) -> None:
+        self._parent._bus.write(b'\x30\x0A')
+
     def reset_controller(self) -> bool:
         self._parent._purge()
         self._parent._bus.write(b'\x30\x01')
@@ -222,5 +251,193 @@ class CANInterface:
         ok = self._parent._bus.read(1)
         return ok[0] == 'U'
     
-    #def setup( 
+    def setup(self, acceptance_code: int, acceptance_mask: int, can_identifier: int, rx_filter_can_indentifier: int, bus_timing: BusTimming = BusTimming.Mode7, extended_frame: bool = False, encapsulation: Encapsulation = Encapsulation.Raw0, custom_bus_timing_0: int = 0, custom_bus_timing_1: int = 0) -> bool:
+        """ Setup the CAN controller
+
+        Args:
+            acceptance_code (int): Acceptance code for filtering the incoming CAN messages (see [SJA1000 datasheet](https://www.nxp.com/docs/en/data-sheet/SJA1000.pdf))
+            acceptance_mask (int): Acceptance mask for filtering the incoming CAN messages (see [SJA1000 datasheet](https://www.nxp.com/docs/en/data-sheet/SJA1000.pdf))
+            can_identifier (int): Identifer to transmit the CAN messages with
+            rx_filter_can_indentifier (int): The exact identifier of the CAN messages to receive. Set to 0 to receive all messages.
+            bus_timing (BusTimming, optional): The different timmings modes. Defaults to BusTimming.Mode7.
+            extended_frame (bool, optional): Transmit and receive extended frames. Defaults to False.
+            encapsulation (Encapsulation, optional): Those diferents modes encapsulates the message inside another type of packets, Except for Raws modes. Defaults to Encapsulation.Raw0.
+            custom_bus_timing_0 (int, optional): If BusTimming.Custom is used, this is the value set for the Bus Timing Register 0 (BTR0) (see [SJA1000 datasheet](https://www.nxp.com/docs/en/data-sheet/SJA1000.pdf)). Defaults to 0.
+            custom_bus_timing_1 (int, optional): If BusTimming.Custom is used, this is the value set for the Bus Timing Register 1 (BTR1) (see [SJA1000 datasheet](https://www.nxp.com/docs/en/data-sheet/SJA1000.pdf)). Defaults to 0.
+
+        Returns:
+            bool: True if the setup was successful
+        """        
+        final = b'\x30\x10'
+        final += bus_timing.to_bytes(1, 'little')
+        if bus_timing == CANInterface.BusTimming.Custom:
+            final += custom_bus_timing_0.to_bytes(1, 'little')
+            final += custom_bus_timing_1.to_bytes(1, 'little')
+        final += acceptance_code.to_bytes(4, 'little')
+        final += acceptance_mask.to_bytes(4, 'little')
+        final += can_identifier.to_bytes(4, 'little')
+        final += rx_filter_can_indentifier.to_bytes(4, 'little')
+        if extended_frame:
+            final += b'\x01'
+        else:
+            final += b'\x00'
+        final += b'\x00' # Normal transmmision
+        final += encapsulation.to_bytes(1, 'little')
+
+        self._parent._purge()
+        self._parent._bus.write(final)
+        ok = self._parent._bus.read(1)
+        return ok[0] == 'U'
+    
+    def send_max_8_bytes(self, msg: bytes):
+        """ Send a CAN message of maximum 8 bytes
+
+        Args:
+            msg (bytes): The CAN message to send
+        """        
+        self._parent._purge()
+        self._parent._bus.write(b'\x30\x03' + len(msg).to_bytes(1, 'little') + msg)
+    
+    def send(self, msg: bytes):
+        """ Send a CAN message
+
+        Args:
+            msg (bytes): The CAN message to send
+        """        
+        self._parent._purge()
+        self._parent._bus.write(b'\x30\x11' + len(msg).to_bytes(2, 'little') + msg)
+    
+
+    # Untested
+
+    def receive(self) -> bytes:
+        """ Warning: Untested and unfinished method
+        Get the last received CAN message
+
+        Returns:
+            bytes: The last received CAN message
+        """        
+        self._parent._purge()
+        self._parent._bus.write(b'\x30\x08')
+        return self._parent._bus.read(8)
+    
+    def get_CAN_status(self) -> int:
+        """ Warning: Untested method
+        Get the status flag of the CAN controller
+
+        Returns:
+            int: The status flag of the CAN controller
+        """        
+        self._parent._purge()
+        self._parent._bus.write(b'\x30\x05')
+        return self._parent._bus.read(1)[0]
+
+    def get_error_code(self) -> int:
+        """ Warning: Untested method
+        Get the error code of the CAN controller
+
+        Returns:
+            int: The error code of the CAN controller
+        """        
+        self._parent._purge()
+        self._parent._bus.write(b'\x30\x06')
+        return self._parent._bus.read(1)[0]
+    
+    def set_lisent_mode_on(self) -> bool:
+        """ Warning: Untested method
+        Set the CAN controller in listen only mode
+
+        Returns:
+            bool: True if the listen only mode was set successfully
+        """        
+        self._parent._purge()
+        self._parent._bus.write(b'\x30\x07')
+        ok = self._parent._bus.read(1)
+        return ok[0] == 'U'
+    
+    def set_transmission_delay(self, delay: int) -> bool:
+        """ Warning: Untested method
+        Set the delay between each byte set to the CAN Controller
+
+        Args:
+            delay (int): Delay in ms
+
+        Returns:
+            bool: True if the delay was set successfully
+        """        
+        self._parent._purge()
+        self._parent._bus.write(b'\x30\x12' + delay.to_bytes(1, 'little'))
+        ok = self._parent._bus.read(1)
+        return ok[0] == 'U'
+    
+    def change_bus_timing(self, bus_timming: BusTimming, custom_bus_timing_0: int = 0, custom_bus_timing_1: int = 0) -> bool:
+        """ Warning: Untested method
+        Change the bus timing
+
+        Args:
+            bus_timming (BusTimming): The different timmings modes
+            custom_bus_timing_0 (int, optional): If BusTimming.Custom is used, this is the value set for the Bus Timing Register 0 (BTR0) (see [SJA1000 datasheet](https://www.nxp.com/docs/en/data-sheet/SJA1000.pdf)). Defaults to 0.
+            custom_bus_timing_1 (int, optional): If BusTimming.Custom is used, this is the value set for the Bus Timing Register 1 (BTR1) (see [SJA1000 datasheet](https://www.nxp.com/docs/en/data-sheet/SJA1000.pdf)). Defaults to 0.
+
+        Returns:
+            bool: True if the bus timing was set successfully
+        """        
+        final = b'\x30\x13'
+        final += bus_timming.to_bytes(1, 'little')
+        if bus_timming == CANInterface.BusTimming.Custom:
+            final += custom_bus_timing_0.to_bytes(1, 'little')
+            final += custom_bus_timing_1.to_bytes(1, 'little')
+        
+        self._parent._purge()
+        self._parent._bus.write(final)
+        ok = self._parent._bus.read(1)
+        return ok[0] == 'U'
+        
+    def change_rx_filter_can_identifier(self, can_identifier: int) -> bool:
+        """ Warning: Untested method
+        Change the RX filter CAN identifier
+
+        Args:
+            can_identifier (int): The CAN identifier
+
+        Returns:
+            bool: True if the RX filter CAN identifier was set successfully
+        """        
+        self._parent._purge()
+        self._parent._bus.write(b'\x30\x0b' + can_identifier.to_bytes(4, 'little'))
+        ok = self._parent._bus.read(1)
+        return ok[0] == 'U'
+
+    def change_can_identifer(self, can_identifier: int) -> bool:
+        """ Warning: Untested method
+        Change the CAN identifier
+
+        Args:
+            can_identifier (int): The CAN identifier
+
+        Returns:
+            bool: True if the CAN identifier was set successfully
+        """        
+        self._parent._purge()
+        self._parent._bus.write(b'\x30\x0c' + can_identifier.to_bytes(4, 'little'))
+        ok = self._parent._bus.read(1)
+        return ok[0] == 'U'
+    
+    def change_frame_format(self, extended_frame: bool) -> bool:
+        """ Warning: Untested method
+        Change the frame format
+
+        Args:
+            extended_frame (bool): True for extended frame, False for standard frame
+
+        Returns:
+            bool: True if the frame format was set successfully
+        """        
+        self._parent._purge()
+        if extended_frame:
+            self._parent._bus.write(b'\x30\x0f\x01')
+        else:
+            self._parent._bus.write(b'\x30\x0f\x00')
+        ok = self._parent._bus.read(1)
+        return ok[0] == 'U'
 
