@@ -1,6 +1,6 @@
-from ftdibus import FTDIBus
+from amtflash.ftdibus import FTDIBus
 
-class AMTFlasher:
+class AMTFlash:
 
     def __init__(self, _custom_vid=None, _custom_pid=None) -> None:
         if _custom_vid is not None:
@@ -28,6 +28,7 @@ class AMTFlasher:
         for i in range(0, len(response)):
             response[i] ^= 0xFF  # This is equivalent to ~ in reality
             response[i] ^= 0x33
+        self._purge()
         self._bus.write(bytearray([0x21, 0x56, response[0], response[1]]))
         ok = self._bus.read(1)
         if ok[0] != 0x33:
@@ -39,14 +40,14 @@ class AMTFlasher:
         self._purge()
         self._bus.write(b'\x26\x00\x01\x00\x00')
         ok = self._bus.read(1)
-        if ok[0] != 'U':
+        if ok[0] != ord('U'):
             raise RuntimeError(
                 'Handshake last phase (checksum) failed, read: ' + str(ok[0]) + ', expected: U')
 
     def _purge(self):
-        readed = self._bus.read(1)
+        readed = self._bus.read(1, False)
         while len(readed) > 0:
-            readed = self._bus.read(1)
+            readed = self._bus.read(1, False)
 
     # Public methods
 
@@ -56,12 +57,12 @@ class AMTFlasher:
         return value / 52.01
     
     def get_usages(self) -> int:
-        return self._bus.read_EE(0x6000, 0x1)[0]
+        return self._bus.read_EE(0x6000, 0x2)[0]
     
     def get_security_num(self) -> bytes:
         data = self._bus.read_EE(0x5000, 0x8)
-        result = bytearray(8)
-        for i in range(8):
+        result = bytearray(len(data))
+        for i in range(0, len(data)):
             result[i] = data[i] ^ self._bus._write_bitmask
         return result
     
@@ -85,7 +86,7 @@ class AMTFlasher:
         self._purge()
         self._bus.write(b'\x24' + delay.to_bytes(1, 'big'))
         ok = self._bus.read(1)
-        return ok[0] == 'U'
+        return ok[0] == ord('U')
     
     # Untested methods
 
@@ -99,7 +100,7 @@ class AMTFlasher:
         self._purge()
         self._bus.write(b'\x20')
         ok = self._bus.read(1)
-        return ok[0] == 'U'
+        return ok[0] == ord('U')
     
     def set_pin_0(self, high: bool) -> bool:
         """ WARNING: Untested method
@@ -114,7 +115,7 @@ class AMTFlasher:
         self._purge()
         self._bus.write(b'\x27\x00' + (b'\x01' if high else b'\x00'))
         ok = self._bus.read(1)
-        return ok[0] == 'U'
+        return ok[0] == ord('U')
     
     def set_pin_2(self, high: bool) -> bool:
         """ WARNING: Untested method
@@ -129,7 +130,7 @@ class AMTFlasher:
         self._purge()
         self._bus.write(b'\x27\x01' + (b'\x01' if high else b'\x00'))
         ok = self._bus.read(1)
-        return ok[0] == 'U'
+        return ok[0] == ord('U')
     
     def unknown_0x2a(self) -> int:
         """ WARNING: Untested method
@@ -142,7 +143,7 @@ class AMTFlasher:
     
 
 class KWPInterface:
-    def __init__(self, parent: AMTFlasher) -> None:
+    def __init__(self, parent: AMTFlash) -> None:
         self._parent = parent
 
     def set_baudrate(self, baudrate: int) -> None:
@@ -166,7 +167,7 @@ class KWPInterface:
         self._parent._purge()
         self._parent._bus.write(b'\x25\x04' + byte.to_bytes(1, 'little'))
         ok = self._parent._bus.read(1)
-        return ok[0] == 'U'
+        return ok[0] == ord('U')
 
 
     def send_byte_custom_baud(self, byte: int, baudrate: int = 5) -> None:
@@ -233,7 +234,7 @@ class CANInterface:
         Mode8 = 8
 
 
-    def __init__(self, parent: AMTFlasher) -> None:
+    def __init__(self, parent: AMTFlash) -> None:
         self._parent = parent
     
     def close(self) -> None:
@@ -243,13 +244,13 @@ class CANInterface:
         self._parent._purge()
         self._parent._bus.write(b'\x30\x01')
         ok = self._parent._bus.read(1)
-        return ok[0] == 'U'
+        return ok[0] == ord('U')
     
     def enable_controller(self) -> bool:
         self._parent._purge()
         self._parent._bus.write(b'\x30\x09')
         ok = self._parent._bus.read(1)
-        return ok[0] == 'U'
+        return ok[0] == ord('U')
     
     def setup(self, acceptance_code: int, acceptance_mask: int, can_identifier: int, rx_filter_can_indentifier: int, bus_timing: BusTimming = BusTimming.Mode7, extended_frame: bool = False, encapsulation: Encapsulation = Encapsulation.Raw0, custom_bus_timing_0: int = 0, custom_bus_timing_1: int = 0) -> bool:
         """ Setup the CAN controller
@@ -287,7 +288,7 @@ class CANInterface:
         self._parent._purge()
         self._parent._bus.write(final)
         ok = self._parent._bus.read(1)
-        return ok[0] == 'U'
+        return ok[0] == ord('U')
     
     def send_max_8_bytes(self, msg: bytes):
         """ Send a CAN message of maximum 8 bytes
@@ -353,7 +354,7 @@ class CANInterface:
         self._parent._purge()
         self._parent._bus.write(b'\x30\x07')
         ok = self._parent._bus.read(1)
-        return ok[0] == 'U'
+        return ok[0] == ord('U')
     
     def set_transmission_delay(self, delay: int) -> bool:
         """ Warning: Untested method
@@ -368,7 +369,7 @@ class CANInterface:
         self._parent._purge()
         self._parent._bus.write(b'\x30\x12' + delay.to_bytes(1, 'little'))
         ok = self._parent._bus.read(1)
-        return ok[0] == 'U'
+        return ok[0] == ord('U')
     
     def change_bus_timing(self, bus_timming: BusTimming, custom_bus_timing_0: int = 0, custom_bus_timing_1: int = 0) -> bool:
         """ Warning: Untested method
@@ -391,7 +392,7 @@ class CANInterface:
         self._parent._purge()
         self._parent._bus.write(final)
         ok = self._parent._bus.read(1)
-        return ok[0] == 'U'
+        return ok[0] == ord('U')
         
     def change_rx_filter_can_identifier(self, can_identifier: int) -> bool:
         """ Warning: Untested method
@@ -406,7 +407,7 @@ class CANInterface:
         self._parent._purge()
         self._parent._bus.write(b'\x30\x0b' + can_identifier.to_bytes(4, 'little'))
         ok = self._parent._bus.read(1)
-        return ok[0] == 'U'
+        return ok[0] == ord('U')
 
     def change_can_identifer(self, can_identifier: int) -> bool:
         """ Warning: Untested method
@@ -421,7 +422,7 @@ class CANInterface:
         self._parent._purge()
         self._parent._bus.write(b'\x30\x0c' + can_identifier.to_bytes(4, 'little'))
         ok = self._parent._bus.read(1)
-        return ok[0] == 'U'
+        return ok[0] == ord('U')
     
     def change_frame_format(self, extended_frame: bool) -> bool:
         """ Warning: Untested method
@@ -439,5 +440,5 @@ class CANInterface:
         else:
             self._parent._bus.write(b'\x30\x0f\x00')
         ok = self._parent._bus.read(1)
-        return ok[0] == 'U'
+        return ok[0] == ord('U')
 

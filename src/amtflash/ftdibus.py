@@ -47,8 +47,8 @@ class FTDIBus:
         self.dev.set_configuration()
 
         cfg: usb.core.Configuration = self.dev.get_active_configuration()
-        self._in_ep = cfg.interfaces()[0].endpoints()[0].bEndpointAddress
-        self._out_ep = cfg.interfaces()[0].endpoints()[1].bEndpointAddress
+        self._in_ep = cfg[(0, 0)][1].bEndpointAddress
+        self._out_ep = cfg[(0, 0)][0].bEndpointAddress
 
         self.reset()
         self.set_latency_timer(1)
@@ -71,8 +71,11 @@ class FTDIBus:
         Returns:
             bytes: data read from eeprom
         """
-        data = bytearray(self.dev.ctrl_transfer(
-            self.REQ_IN, 0x90, 0x0, addr, size))
+        data = bytearray()
+        for i in range(0, size, 2):
+            temp = self.dev.ctrl_transfer(
+                self.REQ_IN, 0x90, 0x0, addr+i, 2)
+            data += temp
         return data
 
     def write_EE(self, addr: int, data: bytes):
@@ -94,10 +97,10 @@ class FTDIBus:
         if self._write_bitmask is not None:
             data = bytearray(data)
             for i in range(len(data)):
-                data ^= self._write_bitmask
+                data[i] ^= self._write_bitmask
         self.dev.write(self._in_ep, data)
 
-    def read(self, size: int) -> bytes:
+    def read(self, size: int, retry: bool = True) -> bytes:
         """Read from the Serial interface (responses)
 
         Args:
@@ -106,37 +109,40 @@ class FTDIBus:
         Returns:
             bytes: data read
         """
-        result_buf = bytearray(size)
+        result_buf = bytearray()
         pos = 0
-        retrys = 1000
+        retrys = 100
 
         while pos < size and not self._read_buffer.empty():
-            result_buf[pos] = self._read_buffer.get()
+            result_buf.append(self._read_buffer.get())
             pos += 1
 
         if pos < size:
             for i in range(0, retrys):
-                tempbuf = self.dev.read(self._out_ep, size - pos)
+                tempbuf = self.dev.read(self._out_ep, (4 << 10))
 
                 if tempbuf[1] & 0x8E != 0:
                     raise RuntimeError('Error reading data')
 
                 if len(tempbuf) > 2:
-                    result_buf[pos:] = tempbuf[2: (
-                        size - pos)+2 if (size - pos)+2 >= len(tempbuf) else len(tempbuf)]
-                    pos += len(tempbuf) - 2
+                    extract = (size - pos) if (size - pos) <= len(tempbuf)-2 else len(tempbuf)-2
+                    result_buf[pos:] = tempbuf[2: extract+2]
+                    pos += extract
 
-                    if pos > size:
+                    if len(tempbuf)-2 > size:
                         # Put extra data in buffer
-                        for i in range(size, pos+1):
-                            self._read_buffer.put(result_buf[i])
+                        for i in range(size+2, len(tempbuf)):
+                            self._read_buffer.put(tempbuf[i])
 
                 if pos >= size:
                     break
 
+                if not retry:
+                    break
+
         # Apply read bitmask
         if self._read_bitmask is not None:
-            for i in range(size):
+            for i in range(len(result_buf)):
                 result_buf[i] ^= self._read_bitmask
 
         return result_buf
