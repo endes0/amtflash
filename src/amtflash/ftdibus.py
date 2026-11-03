@@ -1,5 +1,5 @@
-import queue
 import usb.core
+import usb.util
 from usb.util import build_request_type, CTRL_OUT, CTRL_IN, CTRL_TYPE_VENDOR, CTRL_RECIPIENT_DEVICE
 
 class FTDIBus:
@@ -11,6 +11,13 @@ class FTDIBus:
     REQ_IN = build_request_type(
         CTRL_IN, CTRL_TYPE_VENDOR, CTRL_RECIPIENT_DEVICE)
     FRAC_DIV_CODE = (0, 3, 2, 4, 1, 5, 6, 7)
+
+    # Values of the FTDI reset request
+    RESET_SIO = 0
+    PURGE_RX = 1
+    PURGE_TX = 2
+
+    READ_SIZE = 4 << 10
 
     class Parity(int):
         """Parity"""
@@ -29,11 +36,15 @@ class FTDIBus:
     def __init__(self, vid=0x1c43, pid=0x0500):
         self._vid = vid
         self._pid = pid
-        self._in_ep = None
-        self._out_ep = None
+        self._in_ep = None   # device -> host (responses, received frames, K-line bytes)
+        self._out_ep = None  # host -> device (commands)
+        self._packet_size = 64
         self._write_bitmask = None
         self._read_bitmask = None
-        self._read_buffer = queue.Queue()
+        self._pending = bytearray()
+        # On the K-line the FTDI status may report framing/break errors while the line is held low by an init.
+        # Outside of it a line error means a broken link.
+        self.line_errors_fatal = True
         self.dev = None
 
     def open(self):
@@ -46,9 +57,15 @@ class FTDIBus:
         self.dev.reset()
         self.dev.set_configuration()
 
-        cfg: usb.core.Configuration = self.dev.get_active_configuration()
-        self._in_ep = cfg[(0, 0)][1].bEndpointAddress
-        self._out_ep = cfg[(0, 0)][0].bEndpointAddress
+        interface = self.dev.get_active_configuration()[(0, 0)]
+        for endpoint in interface:
+            if usb.util.endpoint_direction(endpoint.bEndpointAddress) == usb.util.ENDPOINT_IN:
+                self._in_ep = endpoint.bEndpointAddress
+                self._packet_size = endpoint.wMaxPacketSize
+            else:
+                self._out_ep = endpoint.bEndpointAddress
+        if self._in_ep is None or self._out_ep is None:
+            raise RuntimeError('Bulk endpoints not found')
 
         self.reset()
         self.set_latency_timer(1)
@@ -58,8 +75,15 @@ class FTDIBus:
         usb.util.dispose_resources(self.dev)
 
     def reset(self):
-        """Purge device"""
-        self.dev.ctrl_transfer(self.REQ_OUT, 0x00, 0x00, 0x00, None)
+        """Reset the SIO and purge both buffers.
+
+        Resetting the SIO alone does not empty the buffers: leftovers of a previous session come back as the
+        answer to the next handshake, and opening fails every other run.
+        """
+        self.dev.ctrl_transfer(self.REQ_OUT, 0x00, self.RESET_SIO, 0x00, None)
+        self.dev.ctrl_transfer(self.REQ_OUT, 0x00, self.PURGE_RX, 0x00, None)
+        self.dev.ctrl_transfer(self.REQ_OUT, 0x00, self.PURGE_TX, 0x00, None)
+        self._pending.clear()
 
     def read_EE(self, addr: int, size: int) -> bytes:
         """Read EEPROM
@@ -98,10 +122,49 @@ class FTDIBus:
             data = bytearray(data)
             for i in range(len(data)):
                 data[i] ^= self._write_bitmask
-        self.dev.write(self._in_ep, data)
+        self.dev.write(self._out_ep, data)
+
+    def _unpack(self, chunk) -> bytearray:
+        """Payload of a bulk IN transfer, unmasked.
+
+        The FTDI puts 2 status bytes at the start of **every** packet of `wMaxPacketSize` bytes, and a single
+        transfer carries several packets when data keeps coming (e.g. CAN traffic). Stripping only the first two
+        bytes of the transfer leaves status bytes in the middle of the data.
+        """
+        out = bytearray()
+        for start in range(0, len(chunk), self._packet_size):
+            packet = chunk[start:start + self._packet_size]
+            if len(packet) <= 2:
+                continue
+            if self.line_errors_fatal and packet[1] & 0x8E != 0:
+                raise RuntimeError('Error reading data (FTDI line status {:#04x})'.format(packet[1]))
+            out += packet[2:]
+        if self._read_bitmask is not None:
+            for i in range(len(out)):
+                out[i] ^= self._read_bitmask
+        return out
+
+    def read_available(self, timeout_ms: int = 5) -> bytes:
+        """Whatever arrives in one bulk read (already unmasked), plus anything left over by `read`.
+
+        Args:
+            timeout_ms (int, optional): How long to wait for data. Defaults to 5.
+
+        Returns:
+            bytes: data read, possibly empty
+        """
+        out = bytearray(self._pending)
+        self._pending.clear()
+        try:
+            out += self._unpack(self.dev.read(self._in_ep, self.READ_SIZE, timeout=timeout_ms))
+        except usb.core.USBTimeoutError:
+            pass
+        return bytes(out)
 
     def read(self, size: int, retry: bool = True) -> bytes:
         """Read from the Serial interface (responses)
+
+        Bytes beyond `size` are kept for the next call instead of being lost.
 
         Args:
             size (int): size of data to read
@@ -109,43 +172,22 @@ class FTDIBus:
         Returns:
             bytes: data read
         """
-        result_buf = bytearray()
-        pos = 0
-        retrys = 100
+        out = bytearray(self._pending[:size])
+        del self._pending[:size]
+        retrys = 100 if retry else 1
 
-        while pos < size and not self._read_buffer.empty():
-            result_buf.append(self._read_buffer.get())
-            pos += 1
+        for i in range(0, retrys):
+            if len(out) >= size:
+                break
+            try:
+                body = self._unpack(self.dev.read(self._in_ep, self.READ_SIZE, timeout=500))
+            except usb.core.USBTimeoutError:
+                continue
+            take = size - len(out)
+            out += body[:take]
+            self._pending += body[take:]
 
-        if pos < size:
-            for i in range(0, retrys):
-                tempbuf = self.dev.read(self._out_ep, (4 << 10))
-
-                if tempbuf[1] & 0x8E != 0:
-                    raise RuntimeError('Error reading data')
-
-                if len(tempbuf) > 2:
-                    extract = (size - pos) if (size - pos) <= len(tempbuf)-2 else len(tempbuf)-2
-                    result_buf[pos:] = tempbuf[2: extract+2]
-                    pos += extract
-
-                    if len(tempbuf)-2 > size:
-                        # Put extra data in buffer
-                        for i in range(size+2, len(tempbuf)):
-                            self._read_buffer.put(tempbuf[i])
-
-                if pos >= size:
-                    break
-
-                if not retry:
-                    break
-
-        # Apply read bitmask
-        if self._read_bitmask is not None:
-            for i in range(len(result_buf)):
-                result_buf[i] ^= self._read_bitmask
-
-        return result_buf
+        return out
 
     def set_latency_timer(self, value: int):
         """Set latency timer"""
